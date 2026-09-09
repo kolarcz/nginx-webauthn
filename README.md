@@ -81,6 +81,19 @@ REALM_<hostname>=<name>|<credId>|<publicKey>;<name>|<credId>|<publicKey>
 - the name is for you — it shows up in the log at startup and on every sign-in
 - one variable per protected domain
 
+Surrounding quotes are stripped and a warning is logged, so all of these load the
+same way:
+
+```yaml
+      - "REALM_www.example.com=iPhone|ID|KEY"     # correct
+      - REALM_www.example.com="iPhone|ID|KEY"     # tolerated
+      - REALM_www.example.com=iPhone|ID|KEY       # tolerated
+```
+
+In compose list syntax the quotes belong around the whole pair. Put them around
+the value only and they become part of it — which used to leave a stray `"` on
+the end of the public key and made verification fail.
+
 Example with two domains and three devices:
 
 ```yaml
@@ -118,7 +131,10 @@ server {
 
     location / {
         auth_request /auth/check;
-        error_page 401 = @login;
+
+        # No "=" here on purpose: the 401 status is preserved and only the
+        # body is replaced, so the URL and history stay untouched.
+        error_page 401 /auth/unauthorized;
 
         proxy_pass http://app:8080;         # your upstream here
         proxy_set_header Host              $host;
@@ -130,11 +146,48 @@ server {
         proxy_set_header Connection $connection_upgrade;
     }
 
-    location @login {
-        return 302 https://$host/auth/login?rd=$request_uri;
+    # Internal handler for the 401 above. Serves the sign-in page as the body
+    # of the original request.
+    location = /auth/unauthorized {
+        internal;
+
+        set $login http://webauthn:8080/auth/login;
+        proxy_pass $login;
+
+        # error_page keeps the original method, which may be POST
+        proxy_method GET;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+
+        proxy_set_header Host $host;
     }
 }
 ```
+
+### Why there is no redirect
+
+`error_page 401 /auth/unauthorized;` is an internal redirect: nginx swaps the
+response body but the browser never learns about it. Request `/dashboard` while
+signed out and you get the sign-in page **at `/dashboard`**, with a 401 status and
+no history entry. After verification the page calls `location.reload()`, which
+also adds no history entry, and the real content appears at the same address.
+
+From the user's point of view the address bar and the back button never mention
+authentication at all.
+
+Two details make this work:
+
+- **No `=` before the path.** With `error_page 401 = /auth/unauthorized;` nginx
+  would take the status from the handler and return 200, telling caches and
+  crawlers that the sign-in page *is* the content of `/dashboard`.
+- **Only navigations get the page.** Images, stylesheets and `fetch()` calls get
+  an empty 401 instead, so the application's own error handling doesn't receive
+  HTML where it expects JSON. The service decides this from `Sec-Fetch-Mode`,
+  falling back to `Accept`, so no nginx `map` is needed.
+
+One thing this cannot fix: if a session expires mid-form-submit, the POST body is
+gone. That is equally true of a redirect. The answer is a `COOKIE_LIFETIME` long
+enough that it doesn't happen.
 
 For websockets, this belongs above the `server` blocks (in the `http` context):
 
@@ -269,7 +322,8 @@ On verification the service checks:
 
 | Symptom | Cause |
 | --- | --- |
-| Redirect loop on `/auth/login` | `location /auth` is missing or sits under `auth_request` |
+| Redirect loop, or the URL changes to `/auth/login` | `error_page` has an `=` before the path, or still uses `return 302` |
+| Sign-in page appears in `fetch()` responses | `Sec-Fetch-Mode` stripped by an intermediate proxy |
 | "No key is registered for this domain" | `REALM_<hostname>` missing, or the hostname includes a port |
 | 502 on `/auth` | container not running, or `proxy_pass` without a variable and resolver |
 | Face ID never appears | no valid HTTPS, or you're connecting by IP instead of hostname |

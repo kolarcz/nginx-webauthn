@@ -10,6 +10,9 @@ Configuration:
   PORT=8080
 
 Register a key:  https://<host>/auth/register?name=iPhone
+
+The sign-in page is served as the body of a 401 on the original URL via an
+nginx internal redirect, so the address bar and history never change.
 """
 
 import base64
@@ -38,9 +41,25 @@ app = Flask(__name__)
 
 # --- configuration ----------------------------------------------------------
 
+def unquote(value):
+    """Strip stray surrounding quotes.
+
+    Compose list syntax keeps quotes as part of the value when they are placed
+    around the value instead of the whole pair, i.e. VAR="x" rather than "VAR=x".
+    Neither base64 nor a sanitized name can contain a quote, so dropping them at
+    the edges is always safe.
+    """
+    value = value.strip()
+    while value and value[0] in "\"'":
+        value = value[1:]
+    while value and value[-1] in "\"'":
+        value = value[:-1]
+    return value.strip()
+
+
 def parse_lifetime(value):
     """'session' -> None, otherwise 30s / 15m / 12h / 7d -> seconds."""
-    value = value.strip()
+    value = unquote(value)
     if value.lower() == "session":
         return None
 
@@ -65,12 +84,14 @@ class Credential:
 def parse_credentials(host, raw):
     """'iPhone|<credId>|<publicKey>;MacBook|<credId>|<publicKey>'"""
     creds = []
+    quoted = raw.strip() != unquote(raw)
 
-    for entry in (e.strip() for e in raw.split(";")):
+    for entry in raw.split(";"):
+        entry = unquote(entry)
         if not entry:
             continue
 
-        parts = [p.strip() for p in entry.split("|")]
+        parts = [unquote(p) for p in entry.split("|")]
         if len(parts) != 3 or not parts[1] or not parts[2]:
             raise SystemExit(
                 f"REALM_{host}: '{entry}' does not match <name>|<credId>|<publicKey>"
@@ -78,6 +99,12 @@ def parse_credentials(host, raw):
 
         name = parts[0] or f"credential-{len(creds) + 1}"
         creds.append(Credential(name, parts[1], parts[2]))
+
+    if quoted:
+        app.logger.warning(
+            "REALM_%s: stripped surrounding quotes. In compose list syntax the "
+            "quotes belong around the whole pair: - \"REALM_%s=...\"", host, host
+        )
 
     return creds
 
@@ -172,11 +199,17 @@ def sanitize_name(name):
     return clean[:32] or "unnamed"
 
 
-def safe_rd(value):
-    """Guard against open redirects - relative paths only."""
-    if value and value.startswith("/") and not value.startswith("//"):
-        return value
-    return "/"
+def wants_html():
+    """Whether this request is a browser navigation rather than a subresource.
+
+    Sec-Fetch-Mode is the reliable signal where available; Accept is the
+    fallback. Anything else - images, stylesheets, fetch() calls - gets an
+    empty 401 instead of a page it cannot use.
+    """
+    mode = request.headers.get("Sec-Fetch-Mode")
+    if mode:
+        return mode == "navigate"
+    return "text/html" in request.headers.get("Accept", "")
 
 
 def client_data_ok(encoded, challenge, origin):
@@ -261,16 +294,27 @@ def logout():
     return response
 
 
-@app.get("/auth/login")
+# Reached through nginx error_page, which keeps the original request method,
+# so this cannot be GET-only.
+@app.route("/auth/login", methods=["GET", "POST", "HEAD", "PUT", "PATCH", "DELETE"])
 def login():
-    rd = safe_rd(request.args.get("rd"))
-    return Response(PAGE.format(mode="login", name="", rd=rd), mimetype="text/html")
+    if not wants_html():
+        return no_store(Response("", mimetype="text/plain"))
+
+    return no_store(Response(PAGE.format(mode="login", name=""), mimetype="text/html"))
 
 
 @app.get("/auth/register")
 def register():
     name = sanitize_name(request.args.get("name"))
-    return Response(PAGE.format(mode="register", name=name, rd="/"), mimetype="text/html")
+    return no_store(Response(PAGE.format(mode="register", name=name), mimetype="text/html"))
+
+
+def no_store(response):
+    """The page must never be cached in place of the real content."""
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.post("/auth/get_challenge_for_new_key")
@@ -405,25 +449,26 @@ def complete():
 
 PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Authentication</title>
+<title>Sign in</title>
 <style>
-  body {{ font-family: system-ui, sans-serif; max-width: 26rem;
-         margin: 18vh auto; padding: 0 1.5rem; line-height: 1.5; }}
-  button {{ font: inherit; font-weight: 500; width: 100%; padding: 0.9rem 1rem;
-            margin-top: 1.5rem; border: 0; border-radius: 0.6rem;
-            background: #111; color: #fff; cursor: pointer; }}
-  button[disabled] {{ opacity: 0.5; cursor: default; }}
+  body {{ font-family: system-ui, sans-serif; display: flex; flex-direction: column;
+         align-items: center; justify-content: center; min-height: 100vh;
+         margin: 0; padding: 1.5rem; box-sizing: border-box; }}
+  button {{ font: inherit; font-weight: 500; min-width: 16rem; padding: 0.9rem 1.4rem;
+            border: 0; border-radius: 0.6rem; background: #111; color: #fff;
+            cursor: pointer; transition: background 0.15s, color 0.15s; }}
+  button[disabled] {{ background: #e5e5e5; color: #888; cursor: default; }}
+  #msg {{ max-width: 22rem; margin: 1rem 0 0; color: #999; font-size: 0.85rem;
+          text-align: center; }}
+  #msg:empty {{ display: none; }}
   textarea {{ font-family: ui-monospace, monospace; font-size: 0.8rem;
-              width: 100%; height: 7rem; margin-top: 1rem; }}
-  #msg {{ color: #444; }}
+              width: 100%; height: 7rem; margin-top: 0.75rem; }}
 </style>
-<body data-mode="{mode}" data-name="{name}" data-rd="{rd}">
-<h2 id="head"></h2>
-<p id="msg"></p>
+<body data-mode="{mode}" data-name="{name}">
 <button id="go" autofocus></button>
+<p id="msg"></p>
 <script>
 const body = document.body;
-const head = document.getElementById('head');
 const msg = document.getElementById('msg');
 const btn = document.getElementById('go');
 const mode = body.dataset.mode;
@@ -442,7 +487,6 @@ async function register() {{
   const cred = await navigator.credentials.create(opts);
   const line = name + '|' + b64(cred.rawId) + '|' + b64(cred.response.getPublicKey());
 
-  head.textContent = 'Key registered';
   btn.remove();
   msg.innerHTML = 'Append this to REALM_' + location.host
     + ' with a semicolon, then recreate the container:'
@@ -454,7 +498,6 @@ async function login() {{
   const opts = await res.json();
 
   if (opts.error === 'not_configured') {{
-    head.textContent = 'Not configured';
     btn.remove();
     msg.innerHTML = 'No key is registered for this domain. '
       + '<a href="/auth/register?name=device">Register one</a>.';
@@ -478,24 +521,24 @@ async function login() {{
 
   if (!done.ok) throw new Error('verification failed (' + done.status + ')');
 
-  msg.textContent = 'Signed in, redirecting...';
-  location.href = body.dataset.rd;
+  btn.textContent = 'Signed in';
+  location.reload();
 }}
 
-head.textContent = mode === 'register' ? 'Register this device' : 'Sign in';
-btn.textContent = mode === 'register' ? 'Create passkey' : 'Continue with passkey';
+const label = mode === 'register' ? 'Create passkey' : 'Continue with passkey';
+btn.textContent = label;
 
-// iOS Safari requires a user gesture for navigator.credentials, so the flow
-// has to start from a click rather than on page load.
+// iOS Safari requires a user gesture for navigator.credentials
 btn.addEventListener('click', async () => {{
   btn.disabled = true;
-  msg.textContent = 'Waiting for authenticator...';
+  btn.textContent = 'Waiting for authenticator';
+  msg.textContent = '';
   try {{
     await (mode === 'register' ? register() : login());
   }} catch (e) {{
-    msg.textContent = 'Error: ' + (e.message || e);
     btn.disabled = false;
     btn.textContent = 'Try again';
+    msg.textContent = e.message || e;
   }}
 }});
 </script>
