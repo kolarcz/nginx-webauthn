@@ -405,15 +405,34 @@ def complete():
 
 PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<body style="font-family:system-ui;max-width:40rem;margin:20vh auto;padding:0 1.5rem">
-<div id="out" data-mode="{mode}" data-name="{name}" data-rd="{rd}">Waiting for authenticator...</div>
+<title>Authentication</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 26rem;
+         margin: 18vh auto; padding: 0 1.5rem; line-height: 1.5; }}
+  button {{ font: inherit; font-weight: 500; width: 100%; padding: 0.9rem 1rem;
+            margin-top: 1.5rem; border: 0; border-radius: 0.6rem;
+            background: #111; color: #fff; cursor: pointer; }}
+  button[disabled] {{ opacity: 0.5; cursor: default; }}
+  textarea {{ font-family: ui-monospace, monospace; font-size: 0.8rem;
+              width: 100%; height: 7rem; margin-top: 1rem; }}
+  #msg {{ color: #444; }}
+</style>
+<body data-mode="{mode}" data-name="{name}" data-rd="{rd}">
+<h2 id="head"></h2>
+<p id="msg"></p>
+<button id="go" autofocus></button>
 <script>
-const out = document.getElementById('out');
+const body = document.body;
+const head = document.getElementById('head');
+const msg = document.getElementById('msg');
+const btn = document.getElementById('go');
+const mode = body.dataset.mode;
+
 const b64 = b => btoa(String.fromCharCode(...new Uint8Array(b)));
 const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
 async function register() {{
-  const name = out.dataset.name;
+  const name = body.dataset.name;
   const res = await fetch('/auth/get_challenge_for_new_key?name=' + encodeURIComponent(name),
     {{method: 'POST'}});
   const opts = await res.json();
@@ -423,10 +442,11 @@ async function register() {{
   const cred = await navigator.credentials.create(opts);
   const line = name + '|' + b64(cred.rawId) + '|' + b64(cred.response.getPublicKey());
 
-  out.innerHTML = 'Append this to REALM_' + location.host
+  head.textContent = 'Key registered';
+  btn.remove();
+  msg.innerHTML = 'Append this to REALM_' + location.host
     + ' with a semicolon, then recreate the container:'
-    + '<textarea style="width:100%;height:7rem;margin-top:1rem" onclick="this.select()">'
-    + line + '</textarea>';
+    + '<textarea readonly onclick="this.select()">' + line + '</textarea>';
 }}
 
 async function login() {{
@@ -434,7 +454,9 @@ async function login() {{
   const opts = await res.json();
 
   if (opts.error === 'not_configured') {{
-    out.innerHTML = 'No key is configured for this domain. '
+    head.textContent = 'Not configured';
+    btn.remove();
+    msg.innerHTML = 'No key is registered for this domain. '
       + '<a href="/auth/register?name=device">Register one</a>.';
     return;
   }}
@@ -455,17 +477,27 @@ async function login() {{
   }});
 
   if (!done.ok) throw new Error('verification failed (' + done.status + ')');
-  location.href = out.dataset.rd;
+
+  msg.textContent = 'Signed in, redirecting...';
+  location.href = body.dataset.rd;
 }}
 
-(async () => {{
+head.textContent = mode === 'register' ? 'Register this device' : 'Sign in';
+btn.textContent = mode === 'register' ? 'Create passkey' : 'Continue with passkey';
+
+// iOS Safari requires a user gesture for navigator.credentials, so the flow
+// has to start from a click rather than on page load.
+btn.addEventListener('click', async () => {{
+  btn.disabled = true;
+  msg.textContent = 'Waiting for authenticator...';
   try {{
-    await (out.dataset.mode === 'register' ? register() : login());
+    await (mode === 'register' ? register() : login());
   }} catch (e) {{
-    out.innerHTML = 'Error: ' + e
-      + '<br><br><a href="' + location.pathname + location.search + '">Try again</a>';
+    msg.textContent = 'Error: ' + (e.message || e);
+    btn.disabled = false;
+    btn.textContent = 'Try again';
   }}
-}})();
+}});
 </script>
 </body>
 """

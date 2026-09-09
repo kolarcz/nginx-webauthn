@@ -270,8 +270,9 @@ On verification the service checks:
 | Symptom | Cause |
 | --- | --- |
 | Redirect loop on `/auth/login` | `location /auth` is missing or sits under `auth_request` |
-| "No key is configured for this domain" | `REALM_<hostname>` missing, or the hostname includes a port |
+| "No key is registered for this domain" | `REALM_<hostname>` missing, or the hostname includes a port |
 | 502 on `/auth` | container not running, or `proxy_pass` without a variable and resolver |
 | Face ID never appears | no valid HTTPS, or you're connecting by IP instead of hostname |
+| `NotAllowedError`, or "document is not focused" | the flow was triggered without a tap — iOS requires a user gesture |
 | "verification failed (401)" | wrong `publicKey` in the config, or the challenge expired |
 | Auth fires on unrelated domains | catch-all block is missing `default_server` |
