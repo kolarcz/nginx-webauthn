@@ -146,6 +146,24 @@ server {
         proxy_set_header Connection $connection_upgrade;
     }
 
+    location = /auth/check {
+        internal;
+
+        set $webauthn http://webauthn:8080;
+        proxy_pass $webauthn;
+
+        proxy_method GET;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+
+        proxy_set_header Host $host;
+        proxy_set_header Cookie $http_cookie;
+
+        proxy_connect_timeout 3s;
+        proxy_send_timeout 5s;
+        proxy_read_timeout 5s;
+    }
+
     # Internal handler for the 401 above. Serves the sign-in page as the body
     # of the original request.
     location = /auth/unauthorized {
